@@ -1,0 +1,74 @@
+;; eww-sysstat: a system + LLM-quota + calendar popup.
+;; No endpoints, credentials or host names live here; scripts read them
+;; from .env (see .env.example). Open windows with ./sysstat-toggle.
+
+(defpoll SYS :interval "30s"
+  :initial '{"host":"","uptime":"","cpu_temp":"","battery":{"present":false,"percent":0,"status":""}}'
+  "./scripts/system-info")
+(defpoll DISK :interval "30s"
+  :initial '{"path":"/","used":0,"total":0,"percent":0,"error":"Disk unavailable"}'
+  "./scripts/disk-usage")
+(defpoll LLM_USAGE :interval "2m"
+  :initial '(box :visible false)'
+  "./scripts/llm-usage")
+
+(defwidget gauge [value level icon text detail]
+  (box :class "gauge ${level >= 90 ? 'crit' : level >= 70 ? 'warn' : 'ok'}"
+       :orientation "v" :spacing 4 :space-evenly false
+    (overlay
+      (circular-progress :class "ring" :width 64 :height 64 :value {value}
+                         :thickness 5 :start-at 75 :clockwise true)
+      (label :class "ring-icon" :text icon))
+    (label :class "gauge-value" :text text)
+    (label :class "gauge-detail" :limit-width 14 :text detail)))
+
+(defwidget battery-gauge []
+  (gauge :value {SYS.battery.percent}
+         :level {SYS.battery.status == 'Discharging' ? (SYS.battery.percent <= 15 ? 95 : SYS.battery.percent <= 30 ? 75 : 0) : 0}
+         :icon {SYS.battery.status == 'Charging' ? '󰂄' : SYS.battery.status == 'Full' ? '󰁹' : '󰁾'}
+         :text "${SYS.battery.percent}%"
+         :detail {SYS.battery.status}))
+
+(defwidget sysstat [window]
+  (box :class "sysstat" :orientation "v" :spacing 14 :space-evenly false
+    (box :class "header" :orientation "h" :space-evenly false
+      (label :class "heading" :halign "start" :hexpand true :text "󰌢  ${SYS.host}")
+      (label :class "muted" :halign "end" :text {SYS.uptime}))
+    (box :class "card gauges" :orientation "h" :spacing 6 :space-evenly true
+      (gauge :value {EWW_CPU.avg} :level {EWW_CPU.avg}
+             :icon "󰻠"
+             :text "${round(EWW_CPU.avg, 0)}%"
+             :detail {SYS.cpu_temp != '' ? 'CPU · ${SYS.cpu_temp}' : 'CPU'})
+      (gauge :value {EWW_RAM.used_mem_perc} :level {EWW_RAM.used_mem_perc}
+             :icon "󰍛"
+             :text "${round(EWW_RAM.used_mem / 1073741824, 1)}G"
+             :detail "of ${round(EWW_RAM.total_mem / 1073741824, 0)}G RAM")
+      (gauge :value {DISK.percent} :level {DISK.percent}
+             :icon "󰋊"
+             :text {DISK.error != '' ? '—' : '${round(DISK.percent, 0)}%'}
+             :detail {DISK.error != '' ? 'Disk n/a' : '${round(DISK.used / 1073741824, 0)}/${round(DISK.total / 1073741824, 0)}G'})
+      (box :visible {SYS.battery.present} (battery-gauge)))
+    (box :class "card swap" :orientation "v" :spacing 6 :space-evenly false
+         :visible {EWW_RAM.total_swap > 0}
+      (box :orientation "h" :space-evenly false
+        (label :class "row-name" :halign "start" :hexpand true :text "󰾴  Swap")
+        (label :class "muted" :halign "end"
+               :text "${round((EWW_RAM.total_swap - EWW_RAM.free_swap) / 1073741824, 1)} / ${round(EWW_RAM.total_swap / 1073741824, 0)} GiB"))
+      (progress :class "bar"
+                :value {EWW_RAM.total_swap > 0 ? 100 * (EWW_RAM.total_swap - EWW_RAM.free_swap) / EWW_RAM.total_swap : 0}))
+    (literal :content LLM_USAGE)
+    (box :class "card" :orientation "v" :space-evenly false
+      (calendar :show-heading true :show-day-names true :show-details false))
+    (box :class "footer" :orientation "h" :spacing 8 :space-evenly false
+      (button :class "btn" :halign "start" :hexpand true :timeout "5s"
+              :onclick "./scripts/task-manager"
+              "󰓅  Task Manager")
+      (button :class "btn" :halign "end" :onclick "${EWW_CMD} close ${window}" "Close"))))
+
+;; Geometry is passed in by ./sysstat-toggle from SYSSTAT_X/Y/ANCHOR.
+(defwindow sysstat [?x ?y ?anchor]
+  :monitor "<primary>"
+  :geometry (geometry :x {x ?: "-10px"} :y {y ?: "-44px"} :anchor {anchor ?: "bottom right"})
+  :stacking "fg"
+  :wm-ignore false
+  (sysstat :window "sysstat"))

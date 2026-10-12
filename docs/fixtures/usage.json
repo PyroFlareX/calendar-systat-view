@@ -1,0 +1,62 @@
+{
+  "reports": [
+    {
+      "provider": "anthropic",
+      "limits": [
+        {
+          "id": "5h",
+          "label": "5 hours",
+          "window": {
+            "id": "5h",
+            "resetsAt": 1791850569184.0
+          },
+          "amount": {
+            "usedFraction": 0.18
+          },
+          "status": "ok"
+        },
+        {
+          "id": "7d",
+          "label": "7 days",
+          "window": {
+            "id": "7d",
+            "resetsAt": 1792128849184
+          },
+          "amount": {
+            "usedFraction": 0.62
+          },
+          "status": "ok"
+        }
+      ]
+    },
+    {
+      "provider": "openai-codex",
+      "limits": [
+        {
+          "id": "5h",
+          "label": "5 hours",
+          "window": {
+            "id": "5h",
+            "resetsAt": 1791845169184.0
+          },
+          "amount": {
+            "usedFraction": 0.94
+          },
+          "status": "ok"
+        },
+        {
+          "id": "7d",
+          "label": "7 days",
+          "window": {
+            "id": "7d",
+            "resetsAt": 1792298049184
+          },
+          "amount": {
+            "usedFraction": 0.41
+          },
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}

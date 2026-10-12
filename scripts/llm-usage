@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Fetch LLM quota usage and render it as one Eww (Yuck) fragment.
+
+Settings (see .env.example):
+  LLM_USAGE_URL        full URL of the usage endpoint; empty hides the card
+  LLM_USAGE_TOKEN      bearer token sent as "Authorization: Bearer <token>"
+  LLM_USAGE_TOKEN_FILE read the token from this file instead (first line)
+  LLM_USAGE_TIMEOUT    request timeout in seconds (default 5)
+  LLM_USAGE_PROVIDERS  comma list of provider=Label renames,
+                       e.g. "anthropic=Claude,openai-codex=Codex"
+  LLM_USAGE_FIXTURE    read the payload from this JSON file instead of HTTP
+
+Output with no URL configured is an empty box, so the card disappears.
+"""
+from __future__ import annotations
+
+import json
+import math
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+import sysstat_env
+
+WINDOWS = (("5h", "5-hour window"), ("7d", "7-day window"))
+
+
+def _yuck(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _token(settings: dict[str, str]) -> str:
+    token = sysstat_env.get(settings, "LLM_USAGE_TOKEN")
+    token_file = sysstat_env.get(settings, "LLM_USAGE_TOKEN_FILE")
+    if not token and token_file:
+        try:
+            token = Path(token_file).expanduser().read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, UnicodeError, IndexError):
+            token = ""
+    return token
+
+
+def fetch(settings: dict[str, str]) -> dict[str, Any] | None:
+    """Return the payload, an {"error": ...} dict, or None when not configured."""
+    fixture = sysstat_env.get(settings, "LLM_USAGE_FIXTURE")
+    if fixture:
+        try:
+            payload = json.loads(Path(fixture).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"reports": [], "error": "fixture"}
+        return payload if isinstance(payload, dict) else {"reports": [], "error": "fixture"}
+
+    url = sysstat_env.get(settings, "LLM_USAGE_URL")
+    if not url:
+        return None
+    headers = {"Accept": "application/json"}
+    token = _token(settings)
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        timeout = float(sysstat_env.get(settings, "LLM_USAGE_TIMEOUT", "5"))
+    except ValueError:
+        timeout = 5.0
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        return {"reports": [], "error": "auth" if exc.code in (401, 403) else "endpoint"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"reports": [], "error": "endpoint"}
+    return payload if isinstance(payload, dict) else {"reports": [], "error": "endpoint"}
+
+
+def _number(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _remaining(amount: dict[str, Any]) -> float | None:
+    """Fraction of quota remaining in [0, 1], from whichever fields exist."""
+    remaining = _number(amount.get("remainingFraction"))
+    if remaining is not None:
+        return max(0.0, min(1.0, remaining))
+    used_fraction = _number(amount.get("usedFraction"))
+    if used_fraction is not None:
+        return max(0.0, min(1.0, 1.0 - used_fraction))
+    used, limit = _number(amount.get("used")), _number(amount.get("limit"))
+    if used is not None and limit is not None and limit > 0:
+        return max(0.0, min(1.0, 1.0 - used / limit))
+    return None
+
+
+def _duration(timestamp_ms: float, now_ms: int) -> str:
+    seconds = max(0, int((timestamp_ms - now_ms) // 1000))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+
+
+def _renames(settings: dict[str, str]) -> dict[str, str]:
+    renames = {}
+    for pair in sysstat_env.get(settings, "LLM_USAGE_PROVIDERS").split(","):
+        key, sep, label = pair.partition("=")
+        if sep and key.strip() and label.strip():
+            renames[key.strip()] = label.strip()
+    return renames
+
+
+def render(payload: dict[str, Any], now_ms: int, renames: dict[str, str]) -> str:
+    parts = ['(box :class "card quota" :orientation "v" :spacing 2 :space-evenly false']
+    parts.append(
+        '  (box :orientation "h" :space-evenly false'
+        ' (label :text "LLM quota" :class "llm-title" :halign "start" :hexpand true)'
+        ' (button :class "icon-btn" :tooltip "Refresh" :timeout "10s"'
+        ' :onclick "${EWW_CMD} update LLM_USAGE=\\"$(./scripts/llm-usage)\\"" "\U000f0450"))'
+    )
+    reports = payload.get("reports")
+    error = payload.get("error")
+    if not isinstance(reports, list):
+        reports, error = [], error or "endpoint"
+
+    for window_id, title in WINDOWS:
+        rows: dict[tuple[str, str], dict[str, Any]] = {}
+        resets: list[float] = []
+        for report in reports:
+            if not isinstance(report, dict):
+                continue
+            provider = str(report.get("provider") or "unknown")
+            limits = report.get("limits") if isinstance(report.get("limits"), list) else []
+            for limit in limits:
+                if not isinstance(limit, dict) or not isinstance(limit.get("window"), dict):
+                    continue
+                window = limit["window"]
+                if window.get("id") != window_id:
+                    continue
+                reset = _number(window.get("resetsAt"))
+                if reset is not None:
+                    resets.append(reset)
+                label = str(limit.get("label") or limit.get("id") or "quota")
+                amount = limit.get("amount") if isinstance(limit.get("amount"), dict) else {}
+                row = {"provider": provider, "label": label, "remaining": _remaining(amount), "reset": reset, "status": str(limit.get("status") or "")}
+                # Several accounts may report the same provider/window: show the tightest.
+                current = rows.get((provider, label))
+                if current is None or (row["remaining"] is not None and (current["remaining"] is None or row["remaining"] < current["remaining"])):
+                    rows[(provider, label)] = row
+
+        future = [r for r in resets if r > now_ms]
+        header = ("resets " + _duration(min(future), now_ms)) if future else ""
+        parts.append(
+            f'  (box :orientation "h" :space-evenly false'
+            f' (label :text {_yuck(title.upper())} :class "llm-section-title" :halign "start" :hexpand true)'
+            f' (label :text {_yuck(header)} :class "llm-section-title" :halign "end"))'
+        )
+        if not rows:
+            reason = {"auth": "Quota unavailable: token rejected", "endpoint": "Quota unavailable: endpoint", "fixture": "Quota unavailable: fixture"}.get(str(error), "No limits")
+            parts.append(f'  (label :text {_yuck(reason)} :class "llm-unavailable" :halign "start")')
+            continue
+        for (provider, label), row in sorted(rows.items()):
+            if row["remaining"] is None:
+                used, value, level = 0, "?", "unknown"
+            else:
+                used = max(0, min(100, round(100 * (1 - row["remaining"]))))
+                value, level = f"{used}%", "critical" if used >= 90 else ("warn" if used >= 50 else "ok")
+            reset = _duration(row["reset"], now_ms) if row["reset"] is not None else "unknown"
+            tooltip = f"{provider} · {label} · {row['status'] or 'unknown'} · resets in {reset}"
+            parts.append(
+                f'  (box :orientation "v" :spacing 3 :space-evenly false :class "llm-limit" :tooltip {_yuck(tooltip)}'
+                f' (box :orientation "h" :space-evenly false'
+                f' (label :text {_yuck(renames.get(provider, provider))} :halign "start" :hexpand true)'
+                f' (label :text {_yuck(value)} :class "llm-val-{level}" :halign "end"))'
+                f' (progress :value {used} :class "bar llm-bar-{level}"))'
+            )
+    parts.append(")")
+    return "\n".join(parts)
+
+
+def main() -> None:
+    settings = sysstat_env.load()
+    payload = fetch(settings)
+    if payload is None:
+        print('(box :visible false)')
+        return
+    print(render(payload, int(time.time() * 1000), _renames(settings)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # never leave eww with an unparsable fragment
+        print(f'(label :class "llm-unavailable" :text {_yuck("Quota script error: " + type(exc).__name__)})')
+        sys.exit(0)

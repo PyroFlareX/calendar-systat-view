@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Render README screenshots on a private Xvfb display, so the running
+# desktop and its eww daemon are untouched. Uses docs/fixtures/usage.json,
+# never a real endpoint or .env.
+#
+# Needs: Xvfb, xwininfo, eww, ImageMagick 7 (magick).
+#
+#   tools/screenshot [output-dir]          default: docs/images
+#   SCREENSHOT_WALLPAPER=~/bg.jpg tools/screenshot   adds docs/images/desktop.png
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+out=${1:-$root/docs/images}
+display=:${SCREENSHOT_DISPLAY:-87}
+mkdir -p "$out"
+tmp=$(mktemp -d)
+
+Xvfb "$display" -screen 0 1280x1000x24 -nolisten tcp >/dev/null 2>&1 &
+xvfb=$!
+cleanup() {
+  eww -c "$root" kill >/dev/null 2>&1 || true
+  kill "$xvfb" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+sleep 1
+
+export DISPLAY=$display
+export XDG_RUNTIME_DIR=$tmp                           # private eww IPC socket
+export EWW_SYSSTAT_ENV=/dev/null                      # ignore any real .env
+export LLM_USAGE_FIXTURE=$root/docs/fixtures/usage.json
+export LLM_USAGE_PROVIDERS=anthropic=Claude,openai-codex=Codex
+export SYSSTAT_HOSTNAME=${SCREENSHOT_HOSTNAME:-workstation}
+
+eww -c "$root" daemon >/dev/null 2>&1
+sleep 2
+SYSSTAT_ANCHOR=center SYSSTAT_X=0px SYSSTAT_Y=0px "$root/sysstat-toggle" open >/dev/null
+sleep 4                                               # let the polls land
+
+# shoot NAME: crop the open popup, round its corners, add a soft shadow.
+shoot() {
+  local x y w h
+  read -r x y w h < <(xwininfo -name "Eww - sysstat" | awk '
+    /Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4}
+    /Width:/{w=$2} /Height:/{h=$2} END{print x, y, w, h}')
+  magick import -window root "$tmp/screen.png"
+  magick "$tmp/screen.png" -crop "${w}x${h}+${x}+${y}" +repage \
+    \( +clone -alpha extract -fill black -colorize 100 -fill white \
+       -draw "roundrectangle 0,0 $((w-1)),$((h-1)) 14,14" \) \
+    -alpha off -compose CopyOpacity -composite -compose Over \
+    \( +clone -background black -shadow 60x14+0+8 \) \
+    +swap -background none -layers merge +repage "$out/$1.png"
+}
+
+shoot popup
+
+# Minimal variant: no quota endpoint and no battery hides both.
+eww -c "$root" close sysstat >/dev/null
+eww -c "$root" kill >/dev/null 2>&1
+LLM_USAGE_FIXTURE= SYSSTAT_BATTERY=none eww -c "$root" daemon >/dev/null 2>&1
+sleep 2
+SYSSTAT_ANCHOR=center SYSSTAT_X=0px SYSSTAT_Y=0px "$root/sysstat-toggle" open >/dev/null
+sleep 4
+shoot popup-minimal
+
+if [[ -n ${SCREENSHOT_WALLPAPER:-} ]]; then
+  magick "$SCREENSHOT_WALLPAPER" -resize 1600x1000^ -gravity center -extent 1600x1000 \
+    "$out/popup.png" -gravity southeast -geometry +36+36 -composite "$out/desktop.png"
+fi
+echo "wrote: $(cd "$out" && ls | tr '\n' ' ')"

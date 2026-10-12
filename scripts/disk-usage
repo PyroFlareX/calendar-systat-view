@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Report usage for one filesystem.
+
+statvfs is used instead of EWW_DISK because EWW_DISK misreports Btrfs.
+Setting: SYSSTAT_DISK_PATH (default "/").
+"""
+import json
+import os
+
+import sysstat_env
+
+path = sysstat_env.get(sysstat_env.load(), "SYSSTAT_DISK_PATH", "/")
+try:
+    stats = os.statvfs(path)
+    total = stats.f_blocks * stats.f_frsize
+    if total <= 0:
+        raise ValueError("empty filesystem")
+    used = (stats.f_blocks - stats.f_bfree) * stats.f_frsize
+    result = {"path": path, "used": used, "total": total, "percent": 100 * used / total, "error": ""}
+except (OSError, ValueError):
+    result = {"path": path, "used": 0, "total": 0, "percent": 0, "error": "Disk unavailable"}
+
+print(json.dumps(result))

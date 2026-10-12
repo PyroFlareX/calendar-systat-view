@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Hostname, uptime, CPU temperature and battery as one JSON object.
+
+Settings:
+  SYSSTAT_HOSTNAME     label in the header (default: the machine hostname)
+  SYSSTAT_CPU_SENSOR   hwmon driver name for the CPU temperature
+                       (default: first of k10temp, coretemp, zenpower, cpu_thermal)
+  SYSSTAT_BATTERY      power_supply name, e.g. BAT0 (default: first battery found)
+"""
+import json
+import socket
+from pathlib import Path
+
+import sysstat_env
+
+settings = sysstat_env.load()
+
+
+def uptime() -> str:
+    try:
+        seconds = int(float(Path("/proc/uptime").read_text().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return ""
+    d, h, m = seconds // 86400, seconds % 86400 // 3600, seconds % 3600 // 60
+    if d:
+        return f"up {d}d {h}h"
+    return f"up {h}h {m}m" if h else f"up {m}m"
+
+
+def cpu_temp() -> float | None:
+    wanted = sysstat_env.get(settings, "SYSSTAT_CPU_SENSOR")
+    names = [wanted] if wanted else ["k10temp", "coretemp", "zenpower", "cpu_thermal"]
+    hwmons = {}
+    for hwmon in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            hwmons.setdefault((hwmon / "name").read_text().strip(), hwmon)
+        except OSError:
+            continue
+    for name in names:
+        hwmon = hwmons.get(name)
+        if hwmon is None:
+            continue
+        try:
+            return int((hwmon / "temp1_input").read_text()) / 1000
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def battery() -> dict:
+    root = Path("/sys/class/power_supply")
+    wanted = sysstat_env.get(settings, "SYSSTAT_BATTERY")
+    candidates = [root / wanted] if wanted else sorted(root.glob("BAT*"))
+    for supply in candidates:
+        try:
+            return {
+                "present": True,
+                "percent": int((supply / "capacity").read_text()),
+                "status": (supply / "status").read_text().strip(),
+            }
+        except (OSError, ValueError):
+            continue
+    return {"present": False, "percent": 0, "status": "No battery"}
+
+
+temp = cpu_temp()
+print(json.dumps({
+    "host": sysstat_env.get(settings, "SYSSTAT_HOSTNAME", socket.gethostname()),
+    "uptime": uptime(),
+    "cpu_temp": "" if temp is None else f"{round(temp)}°C",
+    "battery": battery(),
+}, ensure_ascii=False))

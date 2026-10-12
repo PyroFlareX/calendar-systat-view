@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Open or close the sysstat popup, placing it from .env settings.
+#
+#   sysstat-toggle [open|close|toggle] [--id NAME]
+#
+# Settings (from the environment or .env):
+#   SYSSTAT_X, SYSSTAT_Y   offsets, e.g. -10px / -44px
+#   SYSSTAT_ANCHOR         e.g. "bottom right", "top left", "center"
+#   EWW_BIN                eww executable (default: eww on PATH)
+#
+# --id lets several copies coexist, e.g. one next to a launcher menu:
+#   SYSSTAT_X=462px SYSSTAT_ANCHOR="bottom left" sysstat-toggle --id menu
+set -euo pipefail
+
+dir=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+env_file=${EWW_SYSSTAT_ENV:-$dir/.env}
+
+# Read KEY=value lines without executing the file. Variables already set in
+# the environment win over the file.
+if [[ -r $env_file ]]; then
+  while IFS='=' read -r key value; do
+    key=${key#export }
+    key=${key//[[:space:]]/}
+    [[ $key =~ ^(SYSSTAT_X|SYSSTAT_Y|SYSSTAT_ANCHOR|EWW_BIN)$ ]] || continue
+    [[ -n ${!key:-} ]] && continue
+    value=${value%%[[:space:]]#*}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    value=${value#[\"\']}; value=${value%[\"\']}
+    printf -v "$key" '%s' "$value"
+  done < <(grep -E '^[[:space:]]*(export[[:space:]]+)?[A-Z_]+=' "$env_file")
+fi
+
+action=toggle
+id=sysstat
+while (($#)); do
+  case $1 in
+    open|close|toggle) action=$1 ;;
+    --id) id=${2:?--id needs a name}; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    *) echo "sysstat-toggle: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+eww=(${EWW_BIN:-eww} -c "$dir")
+
+if [[ $action == toggle ]]; then
+  if "${eww[@]}" active-windows 2>/dev/null | grep -qx "$id: sysstat"; then
+    action=close
+  else
+    action=open
+  fi
+fi
+
+if [[ $action == close ]]; then
+  exec "${eww[@]}" close "$id"
+fi
+
+exec "${eww[@]}" open sysstat --id "$id" \
+  --arg "x=${SYSSTAT_X:--10px}" \
+  --arg "y=${SYSSTAT_Y:--44px}" \
+  --arg "anchor=${SYSSTAT_ANCHOR:-bottom right}"
