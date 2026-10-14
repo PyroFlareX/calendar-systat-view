@@ -3,3 +3,4 @@
 __pycache__/
 # Global excludes often ignore .env.*; the example must ship.
 !.env.example
+token

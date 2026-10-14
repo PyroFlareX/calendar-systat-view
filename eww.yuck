@@ -8,6 +8,12 @@
 (defpoll DISK :interval "30s"
   :initial '{"path":"/","used":0,"total":0,"percent":0,"error":"Disk unavailable"}'
   "./scripts/disk-usage")
+(defpoll GPU :interval "2s"
+  :initial '{"present":false,"name":"","util":0,"vram_used":0,"vram_total":0,"vram_percent":0}'
+  "./scripts/gpu-usage")
+(defpoll NET :interval "2s"
+  :initial '{"present":false,"iface":"","down":0,"up":0,"down_h":"0B","up_h":"0B","percent":0,"mbps":0}'
+  "./scripts/net-usage")
 (defpoll LLM_USAGE :interval "2m"
   :initial '(box :visible false)'
   "./scripts/llm-usage")
@@ -34,20 +40,39 @@
     (box :class "header" :orientation "h" :space-evenly false
       (label :class "heading" :halign "start" :hexpand true :text "󰌢  ${SYS.host}")
       (label :class "muted" :halign "end" :text {SYS.uptime}))
-    (box :class "card gauges" :orientation "h" :spacing 6 :space-evenly true
-      (gauge :value {EWW_CPU.avg} :level {EWW_CPU.avg}
-             :icon "󰻠"
-             :text "${round(EWW_CPU.avg, 0)}%"
-             :detail {SYS.cpu_temp != '' ? 'CPU · ${SYS.cpu_temp}' : 'CPU'})
-      (gauge :value {EWW_RAM.used_mem_perc} :level {EWW_RAM.used_mem_perc}
-             :icon "󰍛"
-             :text "${round(EWW_RAM.used_mem / 1073741824, 1)}G"
-             :detail "of ${round(EWW_RAM.total_mem / 1073741824, 0)}G RAM")
-      (gauge :value {DISK.percent} :level {DISK.percent}
-             :icon "󰋊"
-             :text {DISK.error != '' ? '—' : '${round(DISK.percent, 0)}%'}
-             :detail {DISK.error != '' ? 'Disk n/a' : '${round(DISK.used / 1073741824, 0)}/${round(DISK.total / 1073741824, 0)}G'})
-      (box :visible {SYS.battery.present} (battery-gauge)))
+    (box :class "card gauges" :orientation "v" :spacing 12 :space-evenly false
+      (box :orientation "h" :spacing 6 :space-evenly true
+        (gauge :value {EWW_CPU.avg} :level {EWW_CPU.avg}
+               :icon "󰻠"
+               :text "${round(EWW_CPU.avg, 0)}%"
+               :detail {SYS.cpu_temp != '' ? 'CPU · ${SYS.cpu_temp}' : 'CPU'})
+        (gauge :value {EWW_RAM.used_mem_perc} :level {EWW_RAM.used_mem_perc}
+               :icon "󰍛"
+               :text "${round(EWW_RAM.used_mem / 1073741824, 1)}G"
+               :detail "of ${round(EWW_RAM.total_mem / 1073741824, 0)}G RAM")
+        (gauge :value {DISK.percent} :level {DISK.percent}
+               :icon "󰋊"
+               :text {DISK.error != '' ? '—' : '${round(DISK.percent, 0)}%'}
+               :detail {DISK.error != '' ? 'Disk n/a' : '${round(DISK.used / 1073741824, 0)}/${round(DISK.total / 1073741824, 0)}G'})
+        (box :visible {SYS.battery.present} (battery-gauge)))
+      (box :orientation "h" :spacing 6 :space-evenly true :visible {GPU.present || NET.present}
+        (box :visible {GPU.present}
+          (gauge :value {GPU.util} :level {GPU.util}
+                 :icon "󰢮"
+                 :text "${round(GPU.util, 0)}%"
+                 :detail {GPU.temp != '' ? 'GPU · ${GPU.temp}' : 'GPU'}))
+        (box :visible {GPU.present}
+          (gauge :value {GPU.vram_percent} :level {GPU.vram_percent}
+                 :icon "󰘚"
+                 :text "${round(GPU.vram_used / 1073741824, 1)}G"
+                 :detail "of ${round(GPU.vram_total / 1073741824, 0)}G VRAM"))
+        (box :visible {NET.present}
+          (gauge :value {NET.percent} :level {NET.percent}
+                 :icon "󰛳"
+                 :text "↓${NET.down_h}"
+                 :detail "↑${NET.up_h} · ${NET.iface}"))
+        (box :visible {SYS.battery.present}))
+      (label :class "gauge-detail" :visible {NET.info != ''} :limit-width 48 :text {NET.info}))
     (box :class "card swap" :orientation "v" :spacing 6 :space-evenly false
          :visible {EWW_RAM.total_swap > 0}
       (box :orientation "h" :space-evenly false

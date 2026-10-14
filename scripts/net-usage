@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Network throughput on the default-route interface as one JSON object.
+
+Samples the interface counters over one second. Utilisation is the busier
+direction as a percentage of the link speed.
+Settings:
+  SYSSTAT_NET_IFACE      interface to watch (default: the default-route interface)
+  SYSSTAT_NET_MAX_MBPS   link speed in Mbit/s when the kernel cannot report it,
+                         e.g. on Wi-Fi (default: 1000)
+  SYSSTAT_NET_INFO       true to add "info": network name, local IP and public IP
+                         (default: off; the public IP needs an outbound request)
+  SYSSTAT_PUBLIC_IP_URL  service returning the public IP as plain text
+                         (default: https://api.ipify.org); cached for 10 minutes
+"""
+import json
+import os
+import re
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+
+import sysstat_env
+
+settings = sysstat_env.load()
+NET = Path("/sys/class/net")
+IP_CACHE_SECONDS = 600
+
+
+def default_iface() -> str:
+    try:
+        for line in Path("/proc/net/route").read_text().splitlines()[1:]:
+            f = line.split()
+            if f[1] == "00000000" and int(f[3], 16) & 2:
+                return f[0]
+    except (OSError, IndexError, ValueError):
+        pass
+    return ""
+
+
+def counters(iface: str) -> tuple[int, int]:
+    stats = NET / iface / "statistics"
+    return int((stats / "rx_bytes").read_text()), int((stats / "tx_bytes").read_text())
+
+
+def local_ip(iface: str) -> str:
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", iface], capture_output=True,
+                             text=True, timeout=2).stdout
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+        return m.group(1) if m else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def network_name(iface: str) -> str:
+    try:  # NetworkManager connection name (SSID for Wi-Fi)
+        out = subprocess.run(["nmcli", "-t", "-g", "GENERAL.CONNECTION", "device", "show", iface],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        if out and out != "--":
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return iface
+
+
+def public_ip() -> str:
+    cache = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "eww-sysstat-public-ip"
+    try:
+        if time.time() - cache.stat().st_mtime < IP_CACHE_SECONDS:
+            return cache.read_text().strip()
+    except OSError:
+        pass
+    url = sysstat_env.get(settings, "SYSSTAT_PUBLIC_IP_URL", "https://api.ipify.org")
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            ip = resp.read(64).decode().strip()
+        cache.write_text(ip)
+        return ip
+    except (OSError, ValueError):
+        try:  # stale value beats nothing when offline
+            return cache.read_text().strip()
+        except OSError:
+            return ""
+
+
+def net_info(iface: str) -> str:
+    if sysstat_env.get(settings, "SYSSTAT_NET_INFO").lower() not in ("1", "true", "yes", "on"):
+        return ""
+    parts = [network_name(iface), local_ip(iface), public_ip()]
+    return "  ·  ".join(p for p in parts if p)
+
+
+def link_mbps(iface: str) -> float:
+    override = sysstat_env.get(settings, "SYSSTAT_NET_MAX_MBPS")
+    if override:
+        return float(override)
+    try:
+        speed = int((NET / iface / "speed").read_text())
+        if speed > 0:
+            return float(speed)
+    except (OSError, ValueError):
+        pass
+    try:  # Wi-Fi: negotiated bitrate, best of rx/tx
+        out = subprocess.run(["iw", "dev", iface, "link"], capture_output=True, text=True, timeout=2).stdout
+        rates = [float(m) for m in re.findall(r"bitrate:\s*([\d.]+)\s*MBit/s", out)]
+        if rates:
+            return max(rates)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return 1000.0
+
+
+def human(bps: float) -> str:
+    for unit, div in (("G", 1e9), ("M", 1e6), ("K", 1e3)):
+        if bps >= div:
+            return f"{bps / div:.1f}{unit}"
+    return f"{bps:.0f}B"
+
+
+iface = sysstat_env.get(settings, "SYSSTAT_NET_IFACE", default_iface())
+try:
+    rx0, tx0 = counters(iface)
+    t0 = time.monotonic()
+    time.sleep(1)
+    rx1, tx1 = counters(iface)
+    dt = time.monotonic() - t0
+    down, up = (rx1 - rx0) / dt, (tx1 - tx0) / dt
+    capacity = link_mbps(iface) * 1e6 / 8
+    print(json.dumps({"present": True, "iface": iface, "down": down, "up": up,
+                      "down_h": human(down), "up_h": human(up),
+                      "percent": min(100.0, 100 * max(down, up) / capacity),
+                      "mbps": capacity * 8 / 1e6, "info": net_info(iface)}))
+except (OSError, ValueError):
+    print(json.dumps({"present": False, "iface": iface, "down": 0, "up": 0,
+                      "down_h": "0B", "up_h": "0B", "percent": 0, "mbps": 0, "info": ""}))
